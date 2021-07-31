@@ -3,6 +3,7 @@
  *--------------------------------------------------------*/
 
 import { IRawTheme } from './main';
+import * as fs from 'fs';
 
 export const enum FontStyle {
 	NotSet = -1,
@@ -206,6 +207,13 @@ function resolveParsedThemeRules(parsedThemeRules: ParsedThemeRule[], _colorMap:
 	return new Theme(colorMap, defaults, root);
 }
 
+interface SerializedColorMap {
+	isFrozen: boolean;
+	lastColorId: number;
+	id2color: string[];
+	color2id: { [color: string]: number; };
+}
+
 export class ColorMap {
 
 	private readonly _isFrozen: boolean;
@@ -213,20 +221,46 @@ export class ColorMap {
 	private _id2color: string[];
 	private _color2id: { [color: string]: number; };
 
-	constructor(_colorMap?: string[]) {
-		this._lastColorId = 0;
-		this._id2color = [];
-		this._color2id = Object.create(null);
+	constructor(arg?: string[] | {
+		isFrozen: boolean,
+		lastColorId: number,
+		id2color: string[],
+		color2id: { [color: string]: number; },
+	}) {
+		if (Array.isArray(arg) || arg === undefined) {
+			const _colorMap = arg;
+			this._lastColorId = 0;
+			this._id2color = [];
+			this._color2id = Object.create(null);
 
-		if (Array.isArray(_colorMap)) {
-			this._isFrozen = true;
-			for (let i = 0, len = _colorMap.length; i < len; i++) {
-				this._color2id[_colorMap[i]] = i;
-				this._id2color[i] = _colorMap[i];
+			if (Array.isArray(_colorMap)) {
+				this._isFrozen = true;
+				for (let i = 0, len = _colorMap.length; i < len; i++) {
+					this._color2id[_colorMap[i]] = i;
+					this._id2color[i] = _colorMap[i];
+				}
+			} else {
+				this._isFrozen = false;
 			}
 		} else {
-			this._isFrozen = false;
+			this._isFrozen = arg.isFrozen;
+			this._lastColorId = arg.lastColorId;
+			this._id2color = arg.id2color;
+			this._color2id = arg.color2id;
 		}
+	}
+
+	public serialize(): SerializedColorMap {
+		return {
+			isFrozen: this._isFrozen,
+			lastColorId: this._lastColorId,
+			id2color: this._id2color,
+			color2id: this._color2id,
+		}
+	}
+
+	public static deserealize(serealized: SerializedColorMap): ColorMap {
+		return new ColorMap(serealized);
 	}
 
 	public getId(color: string | null): number {
@@ -253,14 +287,32 @@ export class ColorMap {
 
 }
 
+interface SerializedTheme {
+	colorMap: SerializedColorMap;
+	root: SerializedThemeTrieElement;
+	defaults: SerializedThemeTrieElementRule;
+}
+
+const ENABLE_CACHING = true;
 export class Theme {
 
 	public static createFromRawTheme(source: IRawTheme | undefined, colorMap?: string[]): Theme {
-		return this.createFromParsedTheme(parseTheme(source), colorMap);
+		const cacheFileName = `${source?.name ?? 'anonymous'}.json`;
+		if (ENABLE_CACHING) {
+			if (fs.existsSync(cacheFileName)) {
+				return Theme.deserialize(JSON.parse(fs.readFileSync(cacheFileName).toString()) as SerializedTheme);
+			}
+		}
+		const theme = this.createFromParsedTheme(parseTheme(source), colorMap);
+		if (ENABLE_CACHING) {
+			fs.writeFileSync(cacheFileName, JSON.stringify(theme.serialize()));
+		}
+		return theme;
 	}
 
 	public static createFromParsedTheme(source: ParsedThemeRule[], colorMap?: string[]): Theme {
-		return resolveParsedThemeRules(source, colorMap);
+		const theme = resolveParsedThemeRules(source, colorMap);
+		return theme;
 	}
 
 	private readonly _colorMap: ColorMap;
@@ -273,6 +325,22 @@ export class Theme {
 		this._root = root;
 		this._defaults = defaults;
 		this._cache = {};
+	}
+
+	public serialize(): SerializedTheme {
+		return {
+			colorMap: this._colorMap.serialize(),
+			root: this._root.serialize(),
+			defaults: this._defaults.serialize()
+		}
+	}
+
+	public static deserialize({ colorMap, root, defaults }: SerializedTheme) {
+		return new Theme(
+			ColorMap.deserealize(colorMap),
+			ThemeTrieElementRule.deserealize(defaults),
+			ThemeTrieElement.deserealize(root),
+		);
 	}
 
 	public getColorMap(): string[] {
@@ -325,6 +393,14 @@ export function strArrCmp(a: string[] | null, b: string[] | null): number {
 	return len1 - len2;
 }
 
+interface SerializedThemeTrieElementRule {
+	scopeDepth: number;
+	parentScopes: string[] | null;
+	fontStyle: number;
+	foreground: number;
+	background: number;
+}
+
 export class ThemeTrieElementRule {
 	_themeTrieElementRuleBrand: void;
 
@@ -342,11 +418,19 @@ export class ThemeTrieElementRule {
 		this.background = background;
 	}
 
+	public serialize(): SerializedThemeTrieElementRule {
+		return { ...this };
+	}
+
+	public static deserealize({ scopeDepth, parentScopes, fontStyle, foreground, background }: SerializedThemeTrieElementRule): ThemeTrieElementRule {
+		return new ThemeTrieElementRule(scopeDepth, parentScopes, fontStyle, foreground, background);
+	}
+
 	public clone(): ThemeTrieElementRule {
 		return new ThemeTrieElementRule(this.scopeDepth, this.parentScopes, this.fontStyle, this.foreground, this.background);
 	}
 
-	public static cloneArr(arr:ThemeTrieElementRule[]): ThemeTrieElementRule[] {
+	public static cloneArr(arr: ThemeTrieElementRule[]): ThemeTrieElementRule[] {
 		let r: ThemeTrieElementRule[] = [];
 		for (let i = 0, len = arr.length; i < len; i++) {
 			r[i] = arr[i].clone();
@@ -376,6 +460,11 @@ export class ThemeTrieElementRule {
 export interface ITrieChildrenMap {
 	[segment: string]: ThemeTrieElement;
 }
+interface SerializedThemeTrieElement {
+	mainRule: SerializedThemeTrieElementRule;
+	rulesWithParentScopes: SerializedThemeTrieElementRule[];
+	children: { [segment: string]: SerializedThemeTrieElement };
+}
 
 export class ThemeTrieElement {
 	_themeTrieElementBrand: void;
@@ -392,6 +481,26 @@ export class ThemeTrieElement {
 		this._mainRule = mainRule;
 		this._rulesWithParentScopes = rulesWithParentScopes;
 		this._children = children;
+	}
+
+	public serialize(): SerializedThemeTrieElement {
+		const children: { [segment: string]: SerializedThemeTrieElement } = {};
+		for (const [scope, child] of Object.entries(this._children)) {
+			children[scope] = child.serialize();
+		}
+		return {
+			mainRule: this._mainRule.serialize(),
+			rulesWithParentScopes: this._rulesWithParentScopes.map(rule => rule.serialize()),
+			children,
+		};
+	}
+
+	public static deserealize(serialized: SerializedThemeTrieElement): ThemeTrieElement {
+		const children: ITrieChildrenMap = {};
+		for (const [scope, child] of Object.entries(serialized.children)) {
+			children[scope] = ThemeTrieElement.deserealize(child);
+		}
+		return new ThemeTrieElement(ThemeTrieElementRule.deserealize(serialized.mainRule), serialized.rulesWithParentScopes.map(ThemeTrieElementRule.deserealize), children);
 	}
 
 	private static _sortBySpecificity(arr: ThemeTrieElementRule[]): ThemeTrieElementRule[] {
